@@ -2,14 +2,14 @@ name: Build Mihon extension repo
 
 on:
   push:
-    branches: [repo]                 # chạy khi bạn push lên nhánh 'repo'
+    branches: [repo]
     paths:
       - 'repo/apk/**.apk'
       - '.github/workflows/repo-index.yml'
-  workflow_dispatch: {}              # cho phép chạy tay từ tab Actions
+  workflow_dispatch: {}
 
 permissions:
-  contents: write                    # cần quyền push commit
+  contents: write
 
 concurrency:
   group: repo-index
@@ -18,7 +18,6 @@ concurrency:
 jobs:
   build-index:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,18 +33,19 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3.2.2
 
+      # Dùng build-tools 33.0.2 để có aapt (bản 34 đôi khi thiếu aapt)
       - name: Install Build-Tools (aapt)
         shell: bash
         run: |
-          sdkmanager --install "build-tools;34.0.0"
-          echo "$ANDROID_HOME/build-tools/34.0.0" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_PATH
-          aapt version || true
+          sdkmanager --install "build-tools;33.0.2"
+          echo "$ANDROID_HOME/build-tools/33.0.2" >> $GITHUB_PATH
+          echo "AAPT=$ANDROID_HOME/build-tools/33.0.2/aapt" >> $GITHUB_ENV
+          $ANDROID_HOME/build-tools/33.0.2/aapt version
 
-      - name: Install utilities
+      - name: Install Python deps (Pillow for icon ops)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+          python3 -m pip install --upgrade pip
+          python3 -m pip install Pillow brotli
 
       - name: Download Extensions Inspector (latest release)
         shell: bash
@@ -55,32 +55,37 @@ jobs:
           echo "Downloading: $url"
           curl -L "$url" -o Inspector.jar
           test -s Inspector.jar
-        # Tool để đọc metadata các extension APK. :contentReference[oaicite:3]{index=3}
 
       - name: Download create-repo.py (index generator)
         run: |
           curl -L -o create-repo.py \
             https://raw.githubusercontent.com/keiyoushi/extensions-source/main/.github/scripts/create-repo.py
-        # Script Keiyoushi dùng để tạo index.min.json + trích icon. :contentReference[oaicite:4]{index=4}
 
       - name: Prepare folders
+        shell: bash
         run: |
-          mkdir -p repo/icon
+          mkdir -p repo/icon repo/.inspector-tmp
           ls -la repo/apk || true
+          # Nếu không có APK thì thoát nhẹ
+          shopt -s nullglob
+          APKS=(repo/apk/*.apk)
+          if [ ${#APKS[@]} -eq 0 ]; then
+            echo "No APKs in repo/apk, exiting gracefully."
+            exit 0
+          fi
 
+      # FIX: dùng positional args <apks_dir> <output_json> <tmp_dir>
       - name: Inspect APKs -> repo/output.json
         shell: bash
         run: |
-          set -x
-          # Thử 3 format CLI phổ biến để đảm bảo tương thích
-          java -jar Inspector.jar -i repo/apk -o repo/output.json || \
-          java -jar Inspector.jar --input repo/apk --output repo/output.json || \
-          java -jar Inspector.jar repo/apk repo/output.json
+          set -euo pipefail
+          java -jar Inspector.jar repo/apk repo/output.json repo/.inspector-tmp
           test -s repo/output.json
+          echo "Inspector OK"
 
       - name: Generate index.min.json + icons
         env:
-          AAPT: aapt
+          AAPT: ${{ env.AAPT }}
         run: |
           python3 create-repo.py
           test -s repo/index.min.json
