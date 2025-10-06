@@ -1,0 +1,100 @@
+name: Build Mihon extension repo
+
+on:
+  push:
+    branches: [repo]                 # chạy khi bạn push lên nhánh 'repo'
+    paths:
+      - 'repo/apk/**.apk'
+      - '.github/workflows/repo-index.yml'
+  workflow_dispatch: {}              # cho phép chạy tay từ tab Actions
+
+permissions:
+  contents: write                    # cần quyền push commit
+
+concurrency:
+  group: repo-index
+  cancel-in-progress: true
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3.2.2
+
+      - name: Install Build-Tools (aapt)
+        shell: bash
+        run: |
+          sdkmanager --install "build-tools;34.0.0"
+          echo "$ANDROID_HOME/build-tools/34.0.0" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_PATH
+          aapt version || true
+
+      - name: Install utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Download Extensions Inspector (latest release)
+        shell: bash
+        run: |
+          url=$(curl -s https://api.github.com/repos/keiyoushi/extensions-inspector/releases/latest \
+            | jq -r '.assets[] | select(.name | test(".*\\.jar$")) | .browser_download_url' | head -n1)
+          echo "Downloading: $url"
+          curl -L "$url" -o Inspector.jar
+          test -s Inspector.jar
+        # Tool để đọc metadata các extension APK. :contentReference[oaicite:3]{index=3}
+
+      - name: Download create-repo.py (index generator)
+        run: |
+          curl -L -o create-repo.py \
+            https://raw.githubusercontent.com/keiyoushi/extensions-source/main/.github/scripts/create-repo.py
+        # Script Keiyoushi dùng để tạo index.min.json + trích icon. :contentReference[oaicite:4]{index=4}
+
+      - name: Prepare folders
+        run: |
+          mkdir -p repo/icon
+          ls -la repo/apk || true
+
+      - name: Inspect APKs -> repo/output.json
+        shell: bash
+        run: |
+          set -x
+          # Thử 3 format CLI phổ biến để đảm bảo tương thích
+          java -jar Inspector.jar -i repo/apk -o repo/output.json || \
+          java -jar Inspector.jar --input repo/apk --output repo/output.json || \
+          java -jar Inspector.jar repo/apk repo/output.json
+          test -s repo/output.json
+
+      - name: Generate index.min.json + icons
+        env:
+          AAPT: aapt
+        run: |
+          python3 create-repo.py
+          test -s repo/index.min.json
+          ls -la repo/icon || true
+
+      - name: Commit & push changes
+        shell: bash
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add repo/index.min.json repo/icon/*.png || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(repo): update index.min.json & icons"
+            git push
+          fi
