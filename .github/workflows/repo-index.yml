@@ -4,7 +4,7 @@ on:
   push:
     branches: [repo]
     paths:
-      - 'repo/apk/**.apk'
+      - 'repo/apk/**'                  # bắt mọi thay đổi trong thư mục apk
       - '.github/workflows/repo-index.yml'
   workflow_dispatch: {}
 
@@ -18,6 +18,7 @@ concurrency:
 jobs:
   build-index:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,7 +34,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3.2.2
 
-      # Dùng build-tools 33.0.2 để có aapt (bản 34 đôi khi thiếu aapt)
+      # aapt (build-tools 33.0.2 ổn định)
       - name: Install Build-Tools (aapt)
         shell: bash
         run: |
@@ -42,40 +43,50 @@ jobs:
           echo "AAPT=$ANDROID_HOME/build-tools/33.0.2/aapt" >> $GITHUB_ENV
           $ANDROID_HOME/build-tools/33.0.2/aapt version
 
-      - name: Install Python deps (Pillow for icon ops)
+      - name: Install Python deps
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install Pillow brotli
 
-      - name: Download Extensions Inspector (latest release)
+      - name: Download Extensions Inspector (latest)
         shell: bash
         run: |
+          sudo apt-get update && sudo apt-get install -y jq
           url=$(curl -s https://api.github.com/repos/keiyoushi/extensions-inspector/releases/latest \
             | jq -r '.assets[] | select(.name | test(".*\\.jar$")) | .browser_download_url' | head -n1)
           echo "Downloading: $url"
           curl -L "$url" -o Inspector.jar
           test -s Inspector.jar
 
-      - name: Download create-repo.py (index generator)
+      - name: Download create-repo.py
         run: |
           curl -L -o create-repo.py \
             https://raw.githubusercontent.com/keiyoushi/extensions-source/main/.github/scripts/create-repo.py
 
-      - name: Prepare folders
+      - name: Prepare folders & check APKs
+        id: apks
         shell: bash
         run: |
-          mkdir -p repo/icon repo/.inspector-tmp
+          set -euo pipefail
+          mkdir -p repo/apk repo/icon repo/.inspector-tmp
+          echo "Tree:"
+          ls -la repo || true
           ls -la repo/apk || true
-          # Nếu không có APK thì thoát nhẹ
+
           shopt -s nullglob
-          APKS=(repo/apk/*.apk)
-          if [ ${#APKS[@]} -eq 0 ]; then
-            echo "No APKs in repo/apk, exiting gracefully."
-            exit 0
+          files=(repo/apk/*.apk)
+          if (( ${#files[@]} > 0 )); then
+            echo "found APKs:"
+            printf '%s\n' "${files[@]}"
+            echo "has_apks=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No APKs found in repo/apk"
+            echo "has_apks=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # FIX: dùng positional args <apks_dir> <output_json> <tmp_dir>
+      # Chỉ chạy nếu có APK
       - name: Inspect APKs -> repo/output.json
+        if: steps.apks.outputs.has_apks == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -84,6 +95,7 @@ jobs:
           echo "Inspector OK"
 
       - name: Generate index.min.json + icons
+        if: steps.apks.outputs.has_apks == 'true'
         env:
           AAPT: ${{ env.AAPT }}
         run: |
@@ -92,6 +104,7 @@ jobs:
           ls -la repo/icon || true
 
       - name: Commit & push changes
+        if: steps.apks.outputs.has_apks == 'true'
         shell: bash
         run: |
           git config user.name  "github-actions[bot]"
@@ -103,3 +116,7 @@ jobs:
             git commit -m "chore(repo): update index.min.json & icons"
             git push
           fi
+
+      - name: Done (no APKs)
+        if: steps.apks.outputs.has_apks != 'true'
+        run: echo "Skip build: no APKs in repo/apk"
